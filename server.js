@@ -1,50 +1,89 @@
-// Dependencies.
-var express = require('express');
-var http = require('http');
-var path = require('path');
-var socketIO = require('socket.io');
+var express = require('express'),
+    app = express(),
+    http = require('http'),
+    socketIO = require('socket.io'),
+    server, io;
 
-var app = express();
-var server = http.Server(app);
-var io = socketIO(server);
-
-app.set('port', 5000);
-app.use('/static', express.static(__dirname + '/static'));
-
-// Routing
-app.get('/', function(request, response) {
-  response.sendFile(path.join(__dirname, 'index.html'));
+app.get('/', function (req, res) {
+    res.sendFile(__dirname + '/index.html');
 });
 
-server.listen(5000, function() {
-  console.log('Starting server on port 5000');
-});
+server = http.Server(app);
+server.listen(5000);
 
-var players = {};
-io.on('connection', function(socket) {
-  socket.on('new player', function() {
+io = socketIO(server);
+
+var players = {},
+    unmatched;
+
+function joinGame (socket) {
+
+    // Add the player to our object of players
     players[socket.id] = {
-      x: 300,
-      y: 300
-    };
-  });
-  socket.on('movement', function(data) {
-    var player = players[socket.id] || {};
-    if (data.left) {
-      player.x -= 5;
-    }
-    if (data.up) {
-      player.y -= 5;
-    }
-    if (data.right) {
-      player.x += 5;
-    }
-    if (data.down) {
-      player.y += 5;
-    }
-  });
-});
 
-setInterval(function() {
-  io.sockets.emit('state', players);
-}, 1000 / 60);
+        // The opponent will either be the socket that is
+        // currently unmatched, or it will be null if no
+        // players are unmatched
+        opponent: unmatched,
+
+        // The symbol will become 'O' if the player is unmatched
+        symbol: 'X',
+
+        // The socket that is associated with this player
+        socket: socket
+    };
+
+    // Every other player is marked as 'unmatched', which means
+    // there is not another player to pair them with yet. As soon
+    // as the next socket joins, the unmatched player is paired with
+    // the new socket and the unmatched variable is set back to null
+    if (unmatched) {
+        players[socket.id].symbol = 'O';
+        players[unmatched].opponent = socket.id;
+        unmatched = null;
+    } else {
+        unmatched = socket.id;
+    }
+}
+
+// Returns the opponent socket
+function getOpponent (socket) {
+    if (!players[socket.id].opponent) {
+        return;
+    }
+    return players[
+        players[socket.id].opponent
+    ].socket;
+}
+
+io.on('connection', function (socket) {
+
+    joinGame(socket);
+
+    // Once the socket has an opponent, we can begin the game
+    if (getOpponent(socket)) {
+        socket.emit('game.begin', {
+            symbol: players[socket.id].symbol
+        });
+        getOpponent(socket).emit('game.begin', {
+            symbol: players[getOpponent(socket).id].symbol
+        });
+    }
+
+    // Listens for a move to be made and emits an event to both
+    // players after the move is completed
+    socket.on('make.move', function (data) {
+        if (!getOpponent(socket)) {
+            return;
+        }
+        socket.emit('move.made', data);
+        getOpponent(socket).emit('move.made', data);
+    });
+
+    // Emit an event to the opponent when the player leaves
+    socket.on('disconnect', function () {
+        if (getOpponent(socket)) {
+            getOpponent(socket).emit('opponent.left');
+        }
+    });
+});
